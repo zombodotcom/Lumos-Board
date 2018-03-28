@@ -1,13 +1,14 @@
 #include "FastLED.h"
 
 FASTLED_USING_NAMESPACE
+using namespace std;
 #include <BLEDevice.h>
 #include <BLEServer.h>
 #include <BLEUtils.h>
 #include <BLE2902.h>
 #include "StringSplitter.h"
-#include <EEPROM.h>
-
+#include <cstring>
+#include <cstdlib>
 BLECharacteristic *pCharacteristic;
 bool deviceConnected = false;
 float txValue = 0;
@@ -20,14 +21,13 @@ float txValue = 0;
 #define CHARACTERISTIC_UUID_TX "6E400003-B5A3-F393-E0A9-E50E24DCCA9E"
 
 //led stuff
-
-#define DATA_PIN    17
+#define DATA_PIN   27
 //#define CLK_PIN   4
 #define LED_TYPE    WS2812B
 #define COLOR_ORDER GRB
-#define NUM_LEDS    144
+#define NUM_LEDS    300
 CRGB leds[NUM_LEDS];
-int BRIGHTNESS = 96;
+#define BRIGHTNESS          96
 #define FRAMES_PER_SECOND  120
 uint8_t gHue = 0; // rotating "base color" used by many of the patterns
 String pattern;
@@ -41,6 +41,52 @@ uint8_t rgbR=128;
 uint8_t rgbG=128;
 uint8_t rgbB=128;
 CRGB solidColor=CRGB::Blue;
+
+
+#define FASTLED_SHOW_CORE 0
+
+// -- Task handles for use in the notifications
+static TaskHandle_t FastLEDshowTaskHandle = 0;
+static TaskHandle_t userTaskHandle = 0;
+
+/** show() for ESP32
+    Call this function instead of FastLED.show(). It signals core 0 to issue a show,
+    then waits for a notification that it is done.
+*/
+void FastLEDshowESP32()
+{
+  if (userTaskHandle == 0) {
+    // -- Store the handle of the current task, so that the show task can
+    //    notify it when it's done
+    userTaskHandle = xTaskGetCurrentTaskHandle();
+
+    // -- Trigger the show task
+    xTaskNotifyGive(FastLEDshowTaskHandle);
+
+    // -- Wait to be notified that it's done
+    const TickType_t xMaxBlockTime = pdMS_TO_TICKS( 200 );
+    ulTaskNotifyTake(pdTRUE, xMaxBlockTime);
+    userTaskHandle = 0;
+  }
+}
+
+/** show Task
+    This function runs on core 0 and just waits for requests to call FastLED.show()
+*/
+void FastLEDshowTask(void *pvParameters)
+{
+  // -- Run forever...
+  for (;;) {
+    // -- Wait for the trigger
+    ulTaskNotifyTake(pdTRUE, portMAX_DELAY);
+
+    // -- Do the show (synchronously)
+    FastLED.show();
+
+    // -- Notify the calling task
+    xTaskNotifyGive(userTaskHandle);
+  }
+}
 
 void setSolidColor(uint8_t x, uint8_t y, uint8_t z, String sColorFix)
 {
@@ -67,223 +113,6 @@ void brightFix(String value) {
 String setPattern(String pat) {
   pattern = pat;
   return pattern;
-}
-
-
-
-
-class MyServerCallbacks: public BLEServerCallbacks {
-    void onConnect(BLEServer* pServer) {
-      deviceConnected = true;
-    };
-
-    void onDisconnect(BLEServer* pServer) {
-      deviceConnected = false;
-
-
-    }
-};
-
-class MyCallbacks: public BLECharacteristicCallbacks {
-    void onWrite(BLECharacteristic *pCharacteristic) {
-      std::string rxValue = pCharacteristic->getValue();
-
-
-      if (rxValue.length() > 0) {
-        Serial.println("*********");
-        Serial.print("Received Value: ");
-
-        for (int i = 0; i < rxValue.length(); i++) {
-          Serial.print(rxValue[i]);
-        }
-
-        Serial.println();
-        Serial.println("*********");
-      }
-
-      // Do stuff based on the command received from the app
-      // For some reason using rxValue.compare("A") == 0 doesn't work. Maybe
-      // there are hidden characters I'm not seeing?
-      if (rxValue.find("rainbow") != -1) {
-        Serial.println("Turning ON!");
-        pat = "rainbow";
-        setPattern(pat);
-
-      }
-      
-      if (rxValue.find("juggle") != -1) {
-        Serial.println("Turning ON!");
-        pat = "juggle";
-        setPattern(pat);
-
-      }
-      if (rxValue.find("pride") != -1) {
-        Serial.println("Turning ON!");
-        pat = "pride";
-        setPattern(pat);
-
-      }
-      
-      if (rxValue.find("sinelon") != -1) {
-        Serial.println("Turning ON!");
-        pat = "sinelon";
-        setPattern(pat);
-
-      }
-      if (rxValue.find("bpm") != -1) {
-        Serial.println("Turning ON!");
-        pat = "bpm";
-        setPattern(pat);
-
-      }
-
-      if (rxValue.find("brightness") != -1) {
-        sBrightFix = (rxValue.c_str());
-        brightFix(sBrightFix);
-      }
-
-      if (rxValue.find("color") != -1) {
-        sColorFix = (rxValue.c_str());
-        sColorFix.trim();
-        sColorFix.replace("color,", "");
-        sColorFix.replace(" ", "");
-        setSolidColor(rgbR,rgbG,rgbB,sColorFix);
-        Serial.println(rgbR);
-        pat = "color";
-        setPattern(pat);
-      }
-
-      else if (rxValue.find("off") != -1) {
-        Serial.println("Turning OFF!");
-        pat = "off";
-        setPattern(pat);
-      }
-
-
-    }
-};
-
-void setup() {
-  Serial.begin(115200);
-
-  FastLED.addLeds<LED_TYPE, DATA_PIN, COLOR_ORDER>(leds, NUM_LEDS).setCorrection(TypicalLEDStrip);
-  //FastLED.addLeds<LED_TYPE,DATA_PIN,CLK_PIN,COLOR_ORDER>(leds, NUM_LEDS).setCorrection(TypicalLEDStrip);
-  // set master brightness control
-  FastLED.setBrightness(BRIGHTNESS);
-  EEPROM.begin(512);
-  // Create the BLE Device
-  BLEDevice::init("Lumos Board"); // Give it a name
-
-  // Create the BLE Server
-  BLEServer *pServer = BLEDevice::createServer();
-  pServer->setCallbacks(new MyServerCallbacks());
-
-  // Create the BLE Service
-  BLEService *pService = pServer->createService(SERVICE_UUID);
-
-  // Create a BLE Characteristic
-  pCharacteristic = pService->createCharacteristic(
-                      CHARACTERISTIC_UUID_TX,
-                      BLECharacteristic::PROPERTY_NOTIFY
-                    );
-
-  pCharacteristic->addDescriptor(new BLE2902());
-
-  BLECharacteristic *pCharacteristic = pService->createCharacteristic(
-                                         CHARACTERISTIC_UUID_RX,
-                                         BLECharacteristic::PROPERTY_WRITE
-                                       );
-
-  pCharacteristic->setCallbacks(new MyCallbacks());
-
-  // Start the service
-  pService->start();
-
-  // Start advertising
-  pServer->getAdvertising()->start();
-  Serial.println("Waiting a client connection to notify...");
-
-}
-
-void loop() {
-  EVERY_N_MILLISECONDS( 20 ) {
-    gHue++;  // slowly cycle the "base color" through the rainbow
-  }
-
-  if (deviceConnected) {
-
-    // Fabricate some arbitrary junk for now...
-    if (pattern == "rainbow") {
-      FastLED.show();
-      fill_rainbow( leds, NUM_LEDS, gHue, 7);
-
-    }
-    if (pattern == "off") {
-      FastLED.show();
-      fill_solid(leds, NUM_LEDS, CRGB::Black);
-    }
-
-    if (pattern == "sinelon") {
-      FastLED.show();
-      sinelon();
-    }
-    if (pattern == "bpm") {
-      FastLED.show();
-      bpm();
-    }
-    if (pattern == "juggle") {
-      FastLED.show();
-      juggle();
-    }
-    if (pattern == "color") {
-        FastLED.show();
-      fill_solid(leds, NUM_LEDS, CRGB(rgbR,rgbG,rgbB));
-      }
-      
-  if (pattern == "pride") {
-      FastLED.show();
-      pride();
-
-    }
-
-
-  }
-
-
-  if (!deviceConnected) {
-    FastLED.show();
-    fill_solid(leds, NUM_LEDS, CRGB::Black);
-  }
-  delay(1000);
-}
-
-void sinelon()
-{
-  // a colored dot sweeping back and forth, with fading trails
-  fadeToBlackBy( leds, NUM_LEDS, 20);
-  int pos = beatsin16( 13, 0, NUM_LEDS - 1 );
-  leds[pos] += CHSV( gHue, 255, 192);
-}
-
-void bpm()
-{
-  // colored stripes pulsing at a defined Beats-Per-Minute (BPM)
-  uint8_t BeatsPerMinute = 62;
-  CRGBPalette16 palette = PartyColors_p;
-  uint8_t beat = beatsin8( BeatsPerMinute, 64, 255);
-  for ( int i = 0; i < NUM_LEDS; i++) { //9948
-    leds[i] = ColorFromPalette(palette, gHue + (i * 2), beat - gHue + (i * 10));
-  }
-}
-
-void juggle() {
-  // eight colored dots, weaving in and out of sync with each other
-  fadeToBlackBy( leds, NUM_LEDS, 20);
-  byte dothue = 0;
-  for ( int i = 0; i < 8; i++) {
-    leds[beatsin16( i + 7, 0, NUM_LEDS - 1 )] |= CHSV(dothue, 200, 255);
-    dothue += 32;
-  }
 }
 void pride()
 {
@@ -324,6 +153,217 @@ void pride()
     pixelnumber = (NUM_LEDS - 1) - pixelnumber;
 
     nblend( leds[pixelnumber], newcolor, 64);
+  }
+}
+
+
+
+class MyServerCallbacks: public BLEServerCallbacks {
+    void onConnect(BLEServer* pServer) {
+      deviceConnected = true;
+    };
+
+    void onDisconnect(BLEServer* pServer) {
+      deviceConnected = false;
+
+
+    }
+};
+
+class MyCallbacks: public BLECharacteristicCallbacks {
+    void onWrite(BLECharacteristic *pCharacteristic) {
+      std::string rxValue = pCharacteristic->getValue();
+      
+      if (rxValue.length() > 0) {
+        Serial.println("*********");
+        Serial.print("Received Value: ");
+
+        for (int i = 0; i < rxValue.length(); i++) {
+          Serial.print(rxValue[i]);
+        }
+
+        Serial.println();
+        Serial.println("*********");
+      }
+      // Do stuff based on the command received from the app
+      // For some reason using rxValue.compare("A") == 0 doesn't work. Maybe
+      // there are hidden characters I'm not seeing?
+      if (rxValue.find("rainbow") != -1) {
+        Serial.println("Turning ON!");
+        pat = "rainbow";
+        setPattern(pat);
+
+      }
+      if (rxValue.find("juggle") != -1) {
+        Serial.println("Turning ON!");
+        pat = "juggle";
+        setPattern(pat);
+
+      }
+      if (rxValue.find("sinelon") != -1) {
+        Serial.println("Turning ON!");
+        pat = "sinelon";
+        setPattern(pat);
+
+      }
+      if (rxValue.find("bpm") != -1) {
+        Serial.println("Turning ON!");
+        pat = "bpm";
+        setPattern(pat);
+
+      }
+
+      if (rxValue.find("pride") != -1) {
+        Serial.println("Turning ON!");
+        pat = "pride";
+        setPattern(pat);
+
+      }
+
+     if (rxValue.find("color") != -1) {
+      sColorFix = (rxValue.c_str());
+      sColorFix.trim();
+      sColorFix.replace("color,", "");
+      sColorFix.replace(" ", "");
+      setSolidColor(rgbR,rgbG,rgbB,sColorFix);
+      Serial.println(rgbR);
+      pat = "color";
+      setPattern(pat);
+    }
+
+      else if (rxValue.find("off") != -1) {
+      Serial.println("Turning OFF!");
+        pat = "off";
+        setPattern(pat);
+      }
+
+
+    }
+};
+
+void setup() {
+  Serial.begin(115200);
+
+  FastLED.addLeds<LED_TYPE, DATA_PIN, COLOR_ORDER>(leds, NUM_LEDS).setCorrection(TypicalLEDStrip);
+  //FastLED.addLeds<LED_TYPE,DATA_PIN,CLK_PIN,COLOR_ORDER>(leds, NUM_LEDS).setCorrection(TypicalLEDStrip);
+  // set master brightness control
+  FastLED.setBrightness(BRIGHTNESS);
+  // Create the BLE Device
+  BLEDevice::init("Lumos Board"); // Give it a name
+
+  // Create the BLE Server
+  BLEServer *pServer = BLEDevice::createServer();
+  pServer->setCallbacks(new MyServerCallbacks());
+
+  // Create the BLE Service
+  BLEService *pService = pServer->createService(SERVICE_UUID);
+
+  // Create a BLE Characteristic
+  pCharacteristic = pService->createCharacteristic(
+                      CHARACTERISTIC_UUID_TX,
+                      BLECharacteristic::PROPERTY_NOTIFY
+                    );
+
+  pCharacteristic->addDescriptor(new BLE2902());
+
+  BLECharacteristic *pCharacteristic = pService->createCharacteristic(
+                                         CHARACTERISTIC_UUID_RX,
+                                         BLECharacteristic::PROPERTY_WRITE
+                                       );
+
+  pCharacteristic->setCallbacks(new MyCallbacks());
+
+  // Start the service
+  pService->start();
+
+  // Start advertising
+  pServer->getAdvertising()->start();
+  Serial.println("Waiting a client connection to notify...");
+int core = xPortGetCoreID();
+  Serial.print("Main code running on core ");
+  Serial.println(core);
+
+  // -- Create the FastLED show task
+  xTaskCreatePinnedToCore(FastLEDshowTask, "FastLEDshowTask", 2048, NULL, 2, &FastLEDshowTaskHandle, FASTLED_SHOW_CORE);
+}
+
+void loop() {
+  EVERY_N_MILLISECONDS( 20 ) {
+    gHue++;  // slowly cycle the "base color" through the rainbow
+  }
+
+  if (deviceConnected) {
+
+
+    // Fabricate some arbitrary junk for now...
+    if (pattern == "rainbow") {
+//      FastLED.show();
+      fill_rainbow( leds, NUM_LEDS, gHue, 7);
+
+    }
+    if (pattern == "off") {
+//      FastLED.show();
+      fill_solid(leds, NUM_LEDS, CRGB::Black);
+    }
+
+    if (pattern == "sinelon") {
+//      FastLED.show();
+      sinelon();
+    }
+    if (pattern == "bpm") {
+//      FastLED.show();
+      bpm();
+    }
+    if (pattern == "juggle") {
+//      FastLED.show();
+      juggle();
+    }
+
+    if (pattern == "pride") {
+//      FastLED.show();
+      pride();
+    }
+if (pattern == "color") {
+      FastLED.show();
+      fill_solid(leds, NUM_LEDS, CRGB(rgbR,rgbG,rgbB));
+    }
+
+  }
+  
+  if (!deviceConnected) {
+    FastLED.show();
+    fill_solid(leds, NUM_LEDS, CRGB::Black);
+  }
+  
+FastLEDshowESP32();
+}
+
+void sinelon()
+{
+  // a colored dot sweeping back and forth, with fading trails
+  fadeToBlackBy( leds, NUM_LEDS, 20);
+  int pos = beatsin16( 13, 0, NUM_LEDS - 1 );
+  leds[pos] += CHSV( gHue, 255, 192);
+}
+
+void bpm()
+{
+  // colored stripes pulsing at a defined Beats-Per-Minute (BPM)
+  uint8_t BeatsPerMinute = 62;
+  CRGBPalette16 palette = PartyColors_p;
+  uint8_t beat = beatsin8( BeatsPerMinute, 64, 255);
+  for ( int i = 0; i < NUM_LEDS; i++) { //9948
+    leds[i] = ColorFromPalette(palette, gHue + (i * 2), beat - gHue + (i * 10));
+  }
+}
+
+void juggle() {
+  // eight colored dots, weaving in and out of sync with each other
+  fadeToBlackBy( leds, NUM_LEDS, 20);
+  byte dothue = 0;
+  for ( int i = 0; i < 8; i++) {
+    leds[beatsin16( i + 7, 0, NUM_LEDS - 1 )] |= CHSV(dothue, 200, 255);
+    dothue += 32;
   }
 }
 
