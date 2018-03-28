@@ -194,6 +194,12 @@ class MyCallbacks: public BLECharacteristicCallbacks {
         setPattern(pat);
 
       }
+
+        if (rxValue.find("brightness") != -1) {
+      sBrightFix = (rxValue.c_str());
+      brightFix(sBrightFix);
+    }
+    
       if (rxValue.find("juggle") != -1) {
         Serial.println("Turning ON!");
         pat = "juggle";
